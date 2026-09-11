@@ -1,0 +1,235 @@
+name: Build Sync XxX APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: 'URL ZIP untuk download'
+        required: false
+        type: string
+      tag:
+        description: 'Tag versi'
+        required: false
+        type: string
+      build_type:
+        description: 'Tipe build (debug/release)'
+        required: false
+        type: string
+        default: 'release'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create Gradle Wrapper
+        run: |
+          mkdir -p android/gradle/wrapper
+          
+          echo "📦 Setting up Gradle wrapper..."
+          
+          # Create gradle-wrapper.properties
+          cat > android/gradle/wrapper/gradle-wrapper.properties << 'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.7.0-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+          
+          # Create gradlew script
+          cat > android/gradlew << 'EOFSH'
+          #!/bin/sh
+          
+          APP_NAME="Gradle"
+          APP_HOME="$(cd "$(dirname "$0")" && pwd)"
+          GRADLE_USER_HOME="${GRADLE_USER_HOME:-$HOME/.gradle}"
+          
+          mkdir -p "$GRADLE_USER_HOME/wrapper/dists"
+          
+          WRAPPER_PROPS="$APP_HOME/gradle/wrapper/gradle-wrapper.properties"
+          DIST_URL=$(grep 'distributionUrl=' "$WRAPPER_PROPS" | cut -d'=' -f2 | tr -d ' ')
+          
+          GRADLE_VERSION="8.7.0"
+          WRAPPER_DIR="$GRADLE_USER_HOME/wrapper/dists/gradle-${GRADLE_VERSION}"
+          
+          if [ ! -d "$WRAPPER_DIR" ]; then
+            echo "Downloading Gradle ${GRADLE_VERSION}..."
+            mkdir -p "$WRAPPER_DIR"
+            cd "$WRAPPER_DIR"
+            curl -L -o gradle.zip "$DIST_URL"
+            unzip -q gradle.zip
+            rm gradle.zip
+            cd - > /dev/null
+          fi
+          
+          GRADLE_JAR="$WRAPPER_DIR/gradle-${GRADLE_VERSION}/lib/gradle-${GRADLE_VERSION}.jar"
+          
+          exec java -jar "$GRADLE_JAR" "$@"
+          EOFSH
+          
+          # Make executable
+          chmod +x android/gradlew
+          
+          # Verify
+          if [ -f "android/gradlew" ]; then
+            echo "✅ Gradle wrapper created successfully"
+          else
+            echo "❌ Failed to create gradle wrapper"
+            exit 1
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Pillow
+        run: pip install Pillow
+
+      - name: Generate App Icons
+        run: |
+          cat > generate_icons.py << 'EOF'
+          import os
+          try:
+              from PIL import Image, ImageDraw
+          except ImportError:
+              os.system("pip install Pillow")
+              from PIL import Image, ImageDraw
+
+          ICON_SIZES = {
+              "mdpi":    48,
+              "hdpi":    72,
+              "xhdpi":   96,
+              "xxhdpi":  144,
+              "xxxhdpi": 192
+          }
+
+          THEMES = {
+              "ic_theme_whatsapp":  "whatsapp.jpg",
+              "ic_theme_youtube":   "youtube.jpg",
+              "ic_theme_instagram": "instagram.jpg",
+              "ic_theme_telegram":  "telegram.jpg",
+              "ic_theme_xnxx":      "xnxx.jpg",
+          }
+
+          def load_img(path):
+              img = Image.open(path)
+              if img.mode == "RGBA":
+                  bg = Image.new("RGB", img.size, (0, 0, 0))
+                  bg.paste(img, mask=img.split()[3])
+                  return bg
+              elif img.mode != "RGB":
+                  return img.convert("RGB")
+              return img
+
+          def make_placeholder(size):
+              icon = Image.new("RGB", (size, size), (8, 12, 16))
+              draw = ImageDraw.Draw(icon)
+              draw.ellipse([size//4, size//4, 3*size//4, 3*size//4], fill=(0, 212, 255))
+              return icon
+
+          use_icon = os.path.isfile("sync.jpg")
+          img_base = load_img("sync.jpg") if use_icon else None
+
+          for density, size in ICON_SIZES.items():
+              out_dir = "android/app/src/main/res/mipmap-" + density
+              os.makedirs(out_dir, exist_ok=True)
+
+              icon = img_base.resize((size, size), Image.LANCZOS) if use_icon else make_placeholder(size)
+              icon.save(os.path.join(out_dir, "ic_launcher.png"), "PNG")
+              icon.save(os.path.join(out_dir, "ic_launcher_round.png"), "PNG")
+
+              for name, src_file in THEMES.items():
+                  if os.path.isfile(src_file):
+                      theme_img = load_img(src_file).resize((size, size), Image.LANCZOS)
+                  else:
+                      theme_img = make_placeholder(size)
+
+                  theme_img.save(os.path.join(out_dir, f"{name}.png"), "PNG")
+
+          print("✅ Icons generated")
+          EOF
+
+          python3 generate_icons.py
+
+      - name: Download ZIP (if provided)
+        if: ${{ github.event.inputs.zip_url != '' }}
+        run: |
+          echo "⬇️ Downloading custom ZIP..."
+          curl -L -o source.zip "${{ github.event.inputs.zip_url }}"
+          unzip -o source.zip -d ./
+          echo "✅ ZIP extracted"
+
+      - name: Build APK
+        run: |
+          cd android
+          ./gradlew assemble${{ github.event.inputs.build_type == 'debug' && 'Debug' || 'Release' }} \
+            --no-daemon
+
+      - name: Find and Copy APK
+        run: |
+          mkdir -p output
+          BUILD_TYPE="${{ github.event.inputs.build_type || 'release' }}"
+          
+          if [ "$BUILD_TYPE" = "debug" ]; then
+            find android/app/build/outputs/apk/debug -name "*.apk" -exec cp {} output/SyncXxX-debug.apk \;
+            echo "✅ Debug APK ready"
+          else
+            find android/app/build/outputs/apk/release -name "*.apk" -exec cp {} output/SyncXxX-release.apk \;
+            echo "✅ Release APK ready"
+          fi
+
+      - name: Create Version Info
+        run: |
+          mkdir -p output
+          cat > output/version.txt << EOF
+          Version: ${{ github.event.inputs.tag || 'latest' }}
+          Build Date: $(date)
+          Build Type: ${{ github.event.inputs.build_type || 'release' }}
+          Commit: ${GITHUB_SHA:0:7}
+          EOF
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SyncXxX-APK-${{ github.event.inputs.tag || 'latest' }}
+          path: output/
+          retention-days: 30
+
+      - name: Create GitHub Release
+        id: create_release
+        if: ${{ github.event.inputs.tag != '' }}
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          release_name: Sync XxX ${{ github.event.inputs.tag }}
+          draft: false
+          prerelease: false
+
+      - name: Upload APK to Release
+        if: ${{ github.event.inputs.tag != '' && success() }}
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: output/SyncXxX-${{ github.event.inputs.build_type || 'release' }}.apk
+          asset_name: SyncXxX-${{ github.event.inputs.tag }}-${{ github.event.inputs.build_type || 'release' }}.apk
+          asset_content_type: application/vnd.android.package-archive
