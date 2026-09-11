@@ -1,0 +1,197 @@
+name: Web2APK Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      projectName:
+        description: 'Project Name'
+        required: true
+        type: string
+      appName:
+        description: 'App Display Name'
+        required: true
+        type: string
+      packageName:
+        description: 'Package Name'
+        required: true
+        type: string
+      domain:
+        description: 'Domain URL'
+        required: true
+        type: string
+      versionCode:
+        description: 'Version Code'
+        required: false
+        default: '1'
+        type: string
+      versionName:
+        description: 'Version Name'
+        required: false
+        default: '1.0.0'
+        type: string
+      jobId:
+        description: 'Job ID'
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: 📦 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Java JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+          cache: 'gradle'
+
+      - name: 📱 Setup Android SDK
+        uses: android-actions/setup-android@v2
+        with:
+          api-level: 33
+          ndk-version: '25.2.9519653'
+
+      - name: 📥 Download Cordova
+        run: |
+          npm install -g cordova@latest
+          cordova --version
+
+      - name: 🎨 Create Web2APK Project
+        run: |
+          mkdir -p web2apk_build
+          cd web2apk_build
+          cordova create . com.web2apk ${{ inputs.appName }}
+          cd com.web2apk
+          cordova platform add android@latest
+          cordova plugin add cordova-plugin-whitelist
+          cordova plugin add cordova-plugin-statusbar
+          cordova plugin add cordova-plugin-fullscreen
+
+      - name: 🌐 Configure Domain
+        run: |
+          cd web2apk_build/com.web2apk
+          
+          # Update config.xml
+          sed -i 's|<content.*>|<content src="${{ inputs.domain }}" />|g' config.xml
+          sed -i "s|<name>.*</name>|<name>${{ inputs.appName }}</name>|g" config.xml
+          sed -i "s|<widget id=.*|<widget id=\"${{ inputs.packageName }}\"|g" config.xml
+          
+          # Update package name in gradle
+          sed -i "s/applicationId \".*/applicationId \"${{ inputs.packageName }}\"/g" platforms/android/app/build.gradle || true
+
+      - name: 🔨 Build Android APK
+        run: |
+          cd web2apk_build/com.web2apk
+          cordova build android --release -- --keystore=false
+
+      - name: 📊 Check APK Size
+        run: |
+          APK_PATH="web2apk_build/com.web2apk/platforms/android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          if [ -f "$APK_PATH" ]; then
+            SIZE_BYTES=$(stat -c%s "$APK_PATH" 2>/dev/null || stat -f%z "$APK_PATH")
+            SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1048576" | bc)
+            echo "APK_SIZE=$SIZE_MB" >> $GITHUB_ENV
+            echo "✅ APK Size: ${SIZE_MB}MB"
+            
+            # Size limit check
+            if (( $(echo "$SIZE_MB > 2000" | bc -l) )); then
+              echo "❌ APK exceeds 2000MB limit"
+              exit 1
+            fi
+          else
+            echo "❌ APK not found!"
+            exit 1
+          fi
+
+      - name: 📝 Rename APK
+        run: |
+          APK_SRC="web2apk_build/com.web2apk/platforms/android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          APK_DEST="web2apk_build/${{ inputs.appName }}.apk"
+          if [ -f "$APK_SRC" ]; then
+            cp "$APK_SRC" "$APK_DEST"
+            ls -lh "$APK_DEST"
+          fi
+
+      - name: 📤 Upload APK as Artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web2apk-apk
+          path: web2apk_build/${{ inputs.appName }}.apk
+          retention-days: 30
+
+      - name: 📋 Generate Build Report
+        if: always()
+        run: |
+          {
+            echo "=== WEB2APK BUILD REPORT ==="
+            echo "Job ID: ${{ inputs.jobId }}"
+            echo "App Name: ${{ inputs.appName }}"
+            echo "Package: ${{ inputs.packageName }}"
+            echo "Domain: ${{ inputs.domain }}"
+            echo "Version: ${{ inputs.versionName }} (Code: ${{ inputs.versionCode }})"
+            echo "Build Status: ${{ job.status }}"
+            echo "Build Time: $(date)"
+            echo "APK Size: ${{ env.APK_SIZE }}MB"
+            echo ""
+            echo "=== SYSTEM INFO ==="
+            cordova --version 2>&1 || true
+            java -version 2>&1 || true
+            npm --version
+          } > build_report.txt
+
+      - name: 📤 Upload Build Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-report
+          path: build_report.txt
+          retention-days: 7
+
+      - name: ❌ Generate Error Log
+        if: failure()
+        run: |
+          {
+            echo "=== WEB2APK BUILD ERROR LOG ==="
+            echo "Job ID: ${{ inputs.jobId }}"
+            echo "Timestamp: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            echo "Status: FAILED"
+            echo ""
+            echo "=== ERROR DETAILS ==="
+            echo "App Name: ${{ inputs.appName }}"
+            echo "Package: ${{ inputs.packageName }}"
+            echo "Domain: ${{ inputs.domain }}"
+            echo ""
+            echo "=== CORDOVA INFO ==="
+            cordova --version 2>&1 || echo "Cordova not found"
+            cordova info 2>&1 || echo "Cordova info failed"
+            echo ""
+            echo "=== GRADLE BUILD LOG ==="
+            if [ -f "web2apk_build/com.web2apk/platforms/android/build.log" ]; then
+              tail -100 web2apk_build/com.web2apk/platforms/android/build.log
+            else
+              echo "No gradle log found"
+            fi
+          } > error_log.txt
+
+      - name: 📤 Upload Error Log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-logs
+          path: error_log.txt
+          retention-days: 3
+
+      - name: 🔔 Build Status Summary
+        if: always()
+        run: |
+          echo "📊 Build Summary:"
+          echo "- Status: ${{ job.status }}"
+          echo "- Job ID: ${{ inputs.jobId }}"
+          echo "- APK Size: ${{ env.APK_SIZE }}MB"
+          
