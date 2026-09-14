@@ -34,10 +34,10 @@ jobs:
 
       - name: Prepare and Build
         run: |
-          # 1. Pastikan jq terinstal untuk parsing JSON
+          set -e  # Agar error langsung terdeteksi
+          
           sudo apt-get update && sudo apt-get install -y jq
 
-          # 2. Ambil URL dari payload
           URL=$(echo '${{ github.event.inputs.payload }}' | jq -r '.url')
           
           if [ "$URL" != "null" ] && [ -n "$URL" ]; then
@@ -49,7 +49,7 @@ jobs:
             exit 1
           fi
 
-          # 3. Cari folder asli yang berisi pubspec.yaml
+          # Cari folder pubspec.yaml
           PROJECT_DIR=$(find project -name "pubspec.yaml" -maxdepth 3 -exec dirname {} \; | head -n 1)
           
           if [ -z "$PROJECT_DIR" ]; then
@@ -60,14 +60,13 @@ jobs:
           echo "Pindah ke direktori: $PROJECT_DIR"
           cd "$PROJECT_DIR"
           
-          # 4. Mulai proses Build
+          # Tambahkan flag -v (verbose) agar error build Flutter terlihat detail jika gagal
           flutter clean
           flutter pub get
-          flutter build apk --release
+          flutter build apk --release -v
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: apk-${{ github.event.inputs.jobId }}
-          # Gunakan wildcard (**) agar tetap ketemu meskipun berada di dalam sub-folder
           path: '**/build/app/outputs/flutter-apk/app-release.apk'
