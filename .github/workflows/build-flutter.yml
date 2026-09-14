@@ -32,20 +32,35 @@ jobs:
           flutter-version: '3.22.0'
           channel: 'stable'
 
-      - name: Prepare Project
+      - name: Prepare and Build
         run: |
-          # Payload contains URL or file info
-          # For URL mode:
+          # 1. Pastikan jq terinstal untuk parsing JSON
+          sudo apt-get update && sudo apt-get install -y jq
+
+          # 2. Ambil URL dari payload
           URL=$(echo '${{ github.event.inputs.payload }}' | jq -r '.url')
-          if [ "$URL" != "null" ]; then
+          
+          if [ "$URL" != "null" ] && [ -n "$URL" ]; then
+            echo "Mengunduh source code dari $URL"
             wget -O project.zip "$URL"
-            unzip project.zip -d project
-            cd project
+            unzip -q project.zip -d project
+          else
+            echo "Error: URL tidak ditemukan di payload!"
+            exit 1
           fi
 
-      - name: Build APK
-        run: |
-          cd project
+          # 3. Cari folder asli yang berisi pubspec.yaml
+          PROJECT_DIR=$(find project -name "pubspec.yaml" -maxdepth 3 -exec dirname {} \; | head -n 1)
+          
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "Error: File pubspec.yaml tidak ditemukan di dalam zip!"
+            exit 1
+          fi
+
+          echo "Pindah ke direktori: $PROJECT_DIR"
+          cd "$PROJECT_DIR"
+          
+          # 4. Mulai proses Build
           flutter clean
           flutter pub get
           flutter build apk --release
@@ -54,4 +69,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: apk-${{ github.event.inputs.jobId }}
-          path: project/build/app/outputs/flutter-apk/app-release.apk
+          # Gunakan wildcard (**) agar tetap ketemu meskipun berada di dalam sub-folder
+          path: '**/build/app/outputs/flutter-apk/app-release.apk'
