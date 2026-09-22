@@ -4,13 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       jobId:
-        description: 'Job ID from Bot'
         required: true
       userId:
-        description: 'User ID'
         required: true
       payload:
-        description: 'Build Payload (JSON)'
         required: true
 
 jobs:
@@ -26,23 +23,68 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Prepare Project
+      - name: Download Source
         run: |
-          URL=$(echo '${{ github.event.inputs.payload }}' | jq -r '.url')
-          if [ "$URL" != "null" ]; then
-            wget -O project.zip "$URL"
-            unzip project.zip -d project
-            cd project
+          set -e
+          PAYLOAD='${{ github.event.inputs.payload }}'
+          ZIP_URL=$(echo "$PAYLOAD" | jq -r '.zipAssetUrl // empty')
+          URL=$(echo "$PAYLOAD" | jq -r '.url // empty')
+          
+          if [ -n "$ZIP_URL" ]; then
+            echo "📦 Downloading ZIP from release asset..."
+            curl -L \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/octet-stream" \
+              -o project.zip "$ZIP_URL"
+          elif [ -n "$URL" ]; then
+            echo "🌐 Downloading from URL: $URL"
+            curl -L -o project.zip "$URL"
+          else
+            echo "❌ Payload tidak punya zipAssetUrl atau url"
+            echo "Payload: $PAYLOAD"
+            exit 1
           fi
+          
+          if ! unzip -t project.zip > /dev/null 2>&1; then
+            echo "❌ File bukan ZIP valid"
+            file project.zip
+            exit 1
+          fi
+          
+          mkdir -p project
+          unzip -q project.zip -d project
+          echo "✅ Extracted"
+
+      - name: Detect Project Root
+        run: |
+          ROOT=$(find project -maxdepth 4 -name "gradlew" -type f | head -1)
+          if [ -z "$ROOT" ]; then
+            echo "❌ gradlew tidak ditemukan"
+            find project -maxdepth 3 -type f | head -20
+            exit 1
+          fi
+          DIR=$(dirname "$ROOT")
+          echo "PROJECT_ROOT=$DIR" >> $GITHUB_ENV
+          echo "✅ Root: $DIR"
 
       - name: Build APK
+        working-directory: ${{ env.PROJECT_ROOT }}
         run: |
-          cd project
           chmod +x gradlew
-          ./gradlew assembleRelease
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Find APK
+        run: |
+          APK=$(find "${{ env.PROJECT_ROOT }}" -name "*.apk" -type f | head -1)
+          if [ -z "$APK" ]; then
+            echo "❌ APK tidak ditemukan"
+            exit 1
+          fi
+          echo "APK_PATH=$APK" >> $GITHUB_ENV
+          ls -lh "$APK"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: apk-${{ github.event.inputs.jobId }}
-          path: project/app/build/outputs/apk/release/app-release.apk
+          path: ${{ env.APK_PATH }}
