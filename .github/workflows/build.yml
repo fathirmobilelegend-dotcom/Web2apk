@@ -476,29 +476,81 @@ jobs:
             echo "APK Web2APK tidak ditemukan, skip signing"
           fi
 
+      # ============================================================
+      # PREPARE FLUTTER PROJECT — versi baru, cari pubspec.yaml
+      # di mana pun, kasih info lengkap kalau gagal
+      # ============================================================
       - name: Prepare Flutter project
         if: env.type == 'flutter'
         run: |
           rm -rf flutter-project
           mkdir -p flutter-project
+
+          # Cek file zip ada nggak
+          if [ ! -f flutter-project.zip ]; then
+            echo "❌ flutter-project.zip tidak ditemukan di repo!"
+            echo "Isi folder repo:"
+            ls -la
+            exit 1
+          fi
+
+          echo "📦 Ukuran zip: $(du -h flutter-project.zip | cut -f1)"
+          echo "📦 Tipe file: $(file flutter-project.zip)"
+
+          # Cek apakah beneran zip
+          if ! unzip -t flutter-project.zip >/dev/null 2>&1; then
+            echo "❌ flutter-project.zip bukan file ZIP valid / corrupt!"
+            exit 1
+          fi
+
           unzip -q flutter-project.zip -d flutter-project
 
-          # Kalau zip berisi 1 folder utama, ratakan isinya
-          FIRST_DIR=$(find flutter-project -mindepth 1 -maxdepth 1 -type d | head -n 1)
-          ROOT_FILES=$(find flutter-project -mindepth 1 -maxdepth 1 | wc -l)
+          echo "📂 Isi zip setelah extract (level 1):"
+          ls -la flutter-project
 
-          if [ "$ROOT_FILES" = "1" ] && [ -n "$FIRST_DIR" ] && [ -f "$FIRST_DIR/pubspec.yaml" ]; then
+          # ---- Cari pubspec.yaml di mana pun ----
+          PUBSPEC_PATH=$(find flutter-project -name "pubspec.yaml" -type f | head -n 1)
+
+          if [ -z "$PUBSPEC_PATH" ]; then
+            echo "❌ pubspec.yaml tidak ditemukan di mana pun dalam zip!"
+            echo ""
+            echo "Isi lengkap zip (max 3 level):"
+            find flutter-project -maxdepth 3 | head -50
+            echo ""
+            echo "==========================================="
+            echo "Zip kamu bukan project Flutter yang valid."
+            echo "Pastikan zip berisi file seperti:"
+            echo "  pubspec.yaml"
+            echo "  lib/"
+            echo "  android/"
+            echo "  (file & folder project Flutter lainnya)"
+            echo "==========================================="
+            exit 1
+          fi
+
+          # ---- Kalau pubspec.yaml di subfolder, ratain ----
+          PUBSPEC_DIR=$(dirname "$PUBSPEC_PATH")
+          echo "✅ pubspec.yaml ketemu di: $PUBSPEC_DIR"
+
+          if [ "$PUBSPEC_DIR" != "flutter-project" ]; then
+            echo "🔧 Meratakan isi dari $PUBSPEC_DIR ke root..."
             TMP_DIR=$(mktemp -d)
-            cp -R "$FIRST_DIR"/. "$TMP_DIR"/
+            cp -R "$PUBSPEC_DIR"/. "$TMP_DIR"/
             rm -rf flutter-project
             mkdir -p flutter-project
             cp -R "$TMP_DIR"/. flutter-project/
+            rm -rf "$TMP_DIR"
           fi
 
+          # Verifikasi ulang
           if [ ! -f flutter-project/pubspec.yaml ]; then
-            echo "pubspec.yaml tidak ditemukan"
+            echo "❌ Masih gagal nemu pubspec.yaml setelah diratakan!"
             exit 1
           fi
+
+          echo "✅ Project Flutter siap!"
+          echo "📋 Isi pubspec.yaml (10 baris pertama):"
+          head -10 flutter-project/pubspec.yaml
 
       - name: Detect Flutter version from pubspec
         if: env.type == 'flutter'
@@ -508,14 +560,11 @@ jobs:
           set -e
           PUBSPEC="flutter-project/pubspec.yaml"
 
-          # Baca SDK constraint
           SDK_LINE=$(grep -A2 '^environment:' "$PUBSPEC" | grep 'sdk:' | head -n1 | sed 's/.*sdk:[[:space:]]*//; s/["\'\'']//g' || true)
           echo "Detected SDK constraint: $SDK_LINE"
 
-          # Default untuk kompatibilitas luas
           FLUTTER_VERSION="3.27.0"
 
-          # Function untuk extract major.minor dari SDK constraint
           get_dart_version() {
             echo "$1" | grep -oE '[0-9]+\.[0-9]+' | head -n1
           }
@@ -523,7 +572,6 @@ jobs:
           DART_VERSION=$(get_dart_version "$SDK_LINE")
           echo "Extracted Dart version: $DART_VERSION"
 
-          # Mapping Dart version ke Flutter version
           if [ -n "$DART_VERSION" ]; then
             case "$DART_VERSION" in
               "3.15"*) FLUTTER_VERSION="3.35.2" ;;
@@ -546,7 +594,6 @@ jobs:
             esac
           fi
 
-          # Cek plugin dependencies yang butuh Flutter lebih tinggi
           if grep -Eq 'webview_flutter:[[:space:]]*(\^|>=)?4\.(1[5-9]|[2-9][0-9])' "$PUBSPEC" || \
              grep -Eq 'webview_flutter:[[:space:]]*(\^|>=)?5\.' "$PUBSPEC"; then
             FLUTTER_VERSION="3.35.2"
@@ -607,10 +654,8 @@ jobs:
           BUILD_MODE="${{ env.build_type }}"
           DETECTED_VERSION="${{ env.FLUTTER_VERSION }}"
 
-          # Backup pubspec original biar bisa di-reset tiap percobaan
           cp "$PROJECT_DIR/pubspec.yaml" "$PUBSPEC_BACKUP"
 
-          # ---------- Function auto-fix pubspec (sama kayak sebelumnya) ----------
           auto_fix_pubspec() {
             local PUB_LOG="$1"
             local FIXED=false
@@ -648,7 +693,6 @@ jobs:
               FIXED=true
             fi
 
-            # FIX BUG: pakai capture group () biar \1 beneran refer ke nama paket
             if grep -q "firebase_core" "$PUB_LOG" 2>/dev/null && grep -q "requires SDK version" "$PUB_LOG" 2>/dev/null; then
               echo "   → Turunin firebase_core ke ^2.32.0"
               sed -i -E "s/(firebase_core):[[:space:]]*['\"]?[^'\"]+['\"]?/\1: ^2.32.0/g" pubspec.yaml || true
@@ -698,10 +742,8 @@ jobs:
             fi
           }
 
-          # ---------- Daftar versi: paling lama → paling baru ----------
           ALL_VERSIONS=("3.10.0" "3.13.0" "3.16.0" "3.19.0" "3.22.0" "3.24.0" "3.27.0" "3.29.0" "3.35.2")
 
-          # Urutan: coba versi terdeteksi dulu, terus semua versi dari lama ke baru
           ORDERED=("$DETECTED_VERSION")
           for v in "${ALL_VERSIONS[@]}"; do
             if [ "$v" != "$DETECTED_VERSION" ]; then
@@ -723,7 +765,6 @@ jobs:
 
             FLUTTER_DIR="$HOME/flutter-$VERSION"
 
-            # Install kalau belum ada
             if [ ! -x "$FLUTTER_DIR/bin/flutter" ]; then
               echo "📥 Clone Flutter $VERSION..."
               rm -rf "$FLUTTER_DIR"
@@ -738,14 +779,12 @@ jobs:
 
             cd "$PROJECT_DIR" || continue
 
-            # Reset project ke kondisi original
             cp "$PUBSPEC_BACKUP" pubspec.yaml
             rm -f pubspec.lock
             rm -rf .dart_tool build
 
             echo "Flutter aktif: $(flutter --version 2>&1 | head -1)"
 
-            # ---------- flutter pub get + auto-fix retry ----------
             PUB_LOG="/tmp/pubget-$VERSION.log"
             PUB_OK=false
             for i in 1 2 3 4 5; do
@@ -763,7 +802,6 @@ jobs:
               continue
             fi
 
-            # ---------- Build ----------
             if [ "$BUILD_MODE" = "release" ]; then
               BUILD_CMD="flutter build apk --release"
             else
